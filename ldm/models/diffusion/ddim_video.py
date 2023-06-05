@@ -240,7 +240,7 @@ class DDIMSampler_video(object):
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
 
         #在这里加上引导的两项
-        first_guidance = - (x[x.length - 1] - x[0]) / sigma_1.sqrt()
+        first_guidance = - (x[x.length - 1] - x[0]) / sigma_1
         # To do OF-related guidance or simpler
         # second_guidance = 
         if x.length == 1:
