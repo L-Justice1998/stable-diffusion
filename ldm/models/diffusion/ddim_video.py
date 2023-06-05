@@ -90,10 +90,10 @@ class DDIMSampler_video(object):
 
         self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=verbose)
         # sampling
-        # 原来的shape只有三维 现在改为四维
+        # 原来的shape只有三维 现在还是三维但是bs变成frame
         # C, H, W = shape
         frames, C, H, W = shape
-        size = (batch_size, frames, C, H, W)
+        size = (frames, C, H, W)
         print(f'Data shape for DDIM sampling is {size}, eta {eta}')
 
         samples, intermediates = self.ddim_sampling(conditioning, size,
@@ -121,25 +121,25 @@ class DDIMSampler_video(object):
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None,):
         device = self.model.betas.device
-        b = shape[0]
         # 原来的xT是bs*隐空间的三维
-        # 现在改为bs*frames*三维
-        batch_size, frames, C, H, W = shape
+        # 现在改为frames*三维
+        frames, C, H, W = shape
         #超参，可以放在config或者args里
         alpha = 0.1
         if x_T is None:
             x_T = []
             # img = torch.randn(shape, device=device)
             # 用progressive的方法生成初始噪声
-            first_frame = torch.randn((batch_size,1,C,H,W),device = device)
+            first_frame = torch.randn((frames,C,H,W),device = device)
             x_T.append(first_frame)
             for i in range(frames-1):
-                added_noise = torch.randn((batch_size,1,C,H,W),device = device) * (1/(1+alpha*alpha).sqrt())
-                current_frame = (alpha/(1+alpha*alpha)) * x_T[i] + added_noise
+                added_noise = torch.randn((frames,C,H,W),device = device) * (1/(1+alpha*alpha).sqrt())
+                current_frame = (alpha*alpha/(1+alpha*alpha)) * x_T[i] + added_noise
                 x_T.append(current_frame)
             img = torch.cat(x_T,dim = 1)
         else:
             img = x_T
+        # 此时img(bs,frames,c,h,w)
 
         if timesteps is None:
             timesteps = self.ddpm_num_timesteps if ddim_use_original_steps else self.ddim_timesteps
@@ -156,7 +156,7 @@ class DDIMSampler_video(object):
 
         for i, step in enumerate(iterator):
             index = total_steps - i - 1
-            ts = torch.full((b,), step, device=device, dtype=torch.long)
+            ts = torch.full((frames), step, device=device, dtype=torch.long)
 
             if mask is not None:
                 assert x0 is not None
@@ -169,7 +169,7 @@ class DDIMSampler_video(object):
                                       corrector_kwargs=corrector_kwargs,
                                       unconditional_guidance_scale=unconditional_guidance_scale,
                                       unconditional_conditioning=unconditional_conditioning)
-            #img的shape应该是(bs,frames,c,w,h) 对同一个时刻的不同帧同时生成 原来是(bs,c,w,h)
+            #img的shape应该是(frames,c,w,h) 对同一个时刻的不同帧同时生成 原来是(bs,c,w,h)
             img, pred_x0 = outs
             if callback: callback(i)
             if img_callback: img_callback(pred_x0, i)
@@ -185,9 +185,9 @@ class DDIMSampler_video(object):
                       temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
                       unconditional_guidance_scale=1., unconditional_conditioning=None):
         #sigma_1是第一个高斯的方差 sigma_2是第二个高斯的方差 
-        #x从图片变成了图片列表 普通情况是三张，如果是初始状态是一张 没有额外引导 第二个状态 只有一个引导而且虽然公式一样但是下标不一样
-
-        b, *_, device = *x[0].shape, x[0].device
+        #x从图片变成了图片列表 普通情况是三张，如果是初始状态是一张 没有额外引导 第二个状态 只有一个引导
+        # x 每个元素都是(frames,c,h,w)
+        frames, *_, device = *x[0].shape, x[0].device
 
         # 无条件采样
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
@@ -211,13 +211,13 @@ class DDIMSampler_video(object):
         
         # select parameters corresponding to the currently considered timestep
         # index是指示几步的 从(b, 1, 1, 1)变成(b, 1, 1, 1, 1)
-        a_t = torch.full((b, 1, 1, 1, 1), alphas[index], device=device)
-        a_prev = torch.full((b, 1, 1, 1, 1), alphas_prev[index], device=device)
-        sigma_t = torch.full((b, 1, 1, 1, 1), sigmas[index], device=device)
-        sqrt_one_minus_at = torch.full((b, 1, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
+        a_t = torch.full((frames, 1, 1, 1), alphas[index], device=device)
+        a_prev = torch.full((frames, 1, 1, 1), alphas_prev[index], device=device)
+        sigma_t = torch.full((frames, 1, 1, 1), sigmas[index], device=device)
+        sqrt_one_minus_at = torch.full((frames, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
         #加入两个高斯的方差
-        sigma_1 = torch.full((b, 1, 1, 1, 1), sigma_1,device=device)
-        sigma_2 = torch.full((b, 1, 1, 1, 1), sigma_1,device=device)
+        sigma_1 = torch.full((frames, 1, 1, 1), sigma_1,device=device)
+        sigma_2 = torch.full((frames, 1, 1, 1), sigma_1,device=device)
 
         pred_x0 = (x[0] - sqrt_one_minus_at * e_t) / a_t.sqrt()
         if quantize_denoised:
@@ -229,9 +229,9 @@ class DDIMSampler_video(object):
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
 
         #在这里加上引导的两项
+        first_guidance = - (x[x.length - 1] - x[0]) / sigma_1.sqrt()
         # To do OF-related guidance or simpler
         # second_guidance = 
-        first_guidance = - (x[x.length - 1] - x[0]) / sigma_1.sqrt()
         if x.length == 1:
             first_guidance_scale = 0
             second_guidance_scale = 0
