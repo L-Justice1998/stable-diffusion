@@ -57,8 +57,12 @@ class DDIMSampler_video(object):
     @torch.no_grad()
     def sample(self,
                S,
-               batch_size,
+               frames,
                shape,
+               sigma_1=0.01, 
+               sigma_2=0.001, 
+               first_guidance_scale=1, 
+               second_guidance_scale=1,
                conditioning=None,
                callback=None,
                normals_sequence=None,
@@ -82,11 +86,12 @@ class DDIMSampler_video(object):
         if conditioning is not None:
             if isinstance(conditioning, dict):
                 cbs = conditioning[list(conditioning.keys())[0]].shape[0]
-                if cbs != batch_size:
-                    print(f"Warning: Got {cbs} conditionings but batch-size is {batch_size}")
+                if cbs != frames:
+                    print(f"Warning: Got {cbs} conditionings but batch-size is {frames}")
             else:
-                if conditioning.shape[0] != batch_size:
-                    print(f"Warning: Got {conditioning.shape[0]} conditionings but batch-size is {batch_size}")
+                assert conditioning.shape[0] == 1
+                # if conditioning.shape[0] != 1:
+                #     print(f"Warning: Got {conditioning.shape[0]} conditionings but batch-size is {batch_size}")
 
         self.make_schedule(ddim_num_steps=S, ddim_eta=eta, verbose=verbose)
         # sampling
@@ -96,7 +101,9 @@ class DDIMSampler_video(object):
         size = (frames, C, H, W)
         print(f'Data shape for DDIM sampling is {size}, eta {eta}')
 
-        samples, intermediates = self.ddim_sampling(conditioning, size,
+        samples, intermediates = self.ddim_sampling(conditioning, size,sigma_1=sigma_1, 
+                                                    sigma_2=sigma_2, first_guidance_scale=first_guidance_scale, 
+                                                    second_guidance_scale=second_guidance_scale,
                                                     callback=callback,
                                                     img_callback=img_callback,
                                                     quantize_denoised=quantize_x0,
@@ -114,7 +121,9 @@ class DDIMSampler_video(object):
         return samples, intermediates
 
     @torch.no_grad()
-    def ddim_sampling(self, cond, shape,
+    def ddim_sampling(self, cond, shape,sigma_1, 
+                      sigma_2, first_guidance_scale, 
+                      second_guidance_scale,
                       x_T=None, ddim_use_original_steps=False,
                       callback=None, timesteps=None, quantize_denoised=False,
                       mask=None, x0=None, img_callback=None, log_every_t=100,
@@ -130,10 +139,10 @@ class DDIMSampler_video(object):
             x_T = []
             # img = torch.randn(shape, device=device)
             # 用progressive的方法生成初始噪声
-            first_frame = torch.randn((frames,C,H,W),device = device)
+            first_frame = torch.randn([frames,C,H,W],device = device)
             x_T.append(first_frame)
             for i in range(frames-1):
-                added_noise = torch.randn((frames,C,H,W),device = device) * (1/(1+alpha*alpha).sqrt())
+                added_noise = torch.randn([frames,C,H,W],device = device) * (1/(1+alpha*alpha).sqrt())
                 current_frame = (alpha*alpha/(1+alpha*alpha)) * x_T[i] + added_noise
                 x_T.append(current_frame)
             img = torch.cat(x_T,dim = 1)
@@ -163,7 +172,9 @@ class DDIMSampler_video(object):
                 img_orig = self.model.q_sample(x0, ts)  # TODO: deterministic forward pass?
                 img = img_orig * mask + (1. - mask) * img
             #传入的参数从图片变成了图片list 且注意边界条件
-            outs = self.p_sample_ddim(intermediates['x_inter'][max(0,i-2),i], cond, ts, index=index, use_original_steps=ddim_use_original_steps,
+            outs = self.p_sample_ddim(intermediates['x_inter'][max(0,i-2),i], cond, ts, index=index, sigma_1=sigma_1, 
+                                      sigma_2=sigma_2, first_guidance_scale=first_guidance_scale, second_guidance_scale=second_guidance_scale,
+                                      use_original_steps=ddim_use_original_steps,
                                       quantize_denoised=quantize_denoised, temperature=temperature,
                                       noise_dropout=noise_dropout, score_corrector=score_corrector,
                                       corrector_kwargs=corrector_kwargs,
