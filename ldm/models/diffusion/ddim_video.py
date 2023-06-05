@@ -210,7 +210,7 @@ class DDIMSampler_video(object):
         sigmas = self.model.ddim_sigmas_for_original_num_steps if use_original_steps else self.ddim_sigmas
         
         # select parameters corresponding to the currently considered timestep
-        # index是指示几步的 从(b, 1, 1, 1)变成(b, 1, 1, 1, 1)
+        # index是指示几步的 从(b, 1, 1, 1)变成(frames, 1, 1, 1)
         a_t = torch.full((frames, 1, 1, 1), alphas[index], device=device)
         a_prev = torch.full((frames, 1, 1, 1), alphas_prev[index], device=device)
         sigma_t = torch.full((frames, 1, 1, 1), sigmas[index], device=device)
