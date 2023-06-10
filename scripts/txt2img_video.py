@@ -18,6 +18,7 @@ from contextlib import contextmanager, nullcontext
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
+from ldm.models.diffusion.ddim_video import DDIMSampler_video
 from ldm.models.diffusion.plms import PLMSSampler
 from ldm.models.diffusion.dpm_solver import DPMSolverSampler
 
@@ -241,16 +242,22 @@ def main():
         default="autocast"
     )
     parser.add_argument(
-        "--first_guidance_variance",
+        "--sigma1",
         type=float,
         help="first guidance variance",
-        default=0.01
+        default=0.05
     )
     parser.add_argument(
-        "--second_guidance_variance",
+        "--sigma2",
         type=float,
-        help="second guidance variance",
-        default=0.001
+        help="first guidance variance",
+        default=0.1
+    )
+    parser.add_argument(
+        "--sigma3",
+        type=float,
+        help="first guidance variance",
+        default=0.03
     )
     parser.add_argument(
         "--first_guidance_scale",
@@ -265,10 +272,48 @@ def main():
         default=1.0
     )
     parser.add_argument(
+        "--total_guidance_scale",
+        type=float,
+        help="total guidance scale",
+        default=1.0
+    )
+    parser.add_argument(
         "--alpha",
         type=float,
         help="progressive video prior hyperparameter",
         default=0.05
+    )
+    # parser.add_argument('--img', dest='img', nargs=2, required=True)
+    # for RIFE hyperparameters
+    # parser.add_argument(
+    #     '--exp', 
+    #     default=4, 
+    #     type=int
+    # )
+    # parser.add_argument(
+    #     '--ratio', 
+    #     default=0,
+    #     type=float, 
+    #     help='inference ratio between two images with 0 - 1 range'
+    # )
+    # parser.add_argument(
+    #     '--rthreshold', 
+    #     default=0.02, 
+    #     ype=float, 
+    #     help='returns image when actual ratio falls in given range threshold'
+    # )
+    # parser.add_argument(
+    #     '--rmaxcycles', 
+    #     default=8, 
+    #     type=int, 
+    #     help='limit max number of bisectional cycles'
+    # )
+    parser.add_argument(
+        '--model', 
+        dest='modelDir', 
+        type=str, 
+        default='RIFEModel', 
+        help='directory with trained model files'
     )
     opt = parser.parse_args()
 
@@ -285,13 +330,37 @@ def main():
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
+    # load RIFE 
 
-    if opt.dpm_solver:
-        sampler = DPMSolverSampler(model)
-    elif opt.plms:
-        sampler = PLMSSampler(model)
-    else:
-        sampler = DDIMSampler(model)
+    try:
+        try:
+            try:
+                from RIFEModel.RIFE_HDv2 import Model
+                RIFE_model = Model()
+                RIFE_model.load_model(opt.modelDir, -1)
+                print("Loaded v2.x HD model.")
+            except:
+                from RIFEModel.RIFE_HDv3 import Model
+                RIFE_model = Model()
+                RIFE_model.load_model(opt.modelDir, -1)
+                print("Loaded v3.x HD model.")
+        except:
+            from RIFEModel.RIFE_HD import Model
+            RIFE_model = Model()
+            RIFE_model.load_model(opt.modelDir, -1)
+            print("Loaded v1.x HD model")
+    except:
+        from RIFEModel.RIFE import Model
+        RIFE_model = Model()
+        RIFE_model.load_model(opt.modelDir, -1)
+        print("Loaded ArXiv-RIFE model")
+    
+    # if opt.dpm_solver:
+    #     sampler = DPMSolverSampler(model)
+    # elif opt.plms:
+    #     sampler = PLMSSampler(model)
+    # else:
+    sampler = DDIMSampler_video(model,RIFE_model)
 
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
@@ -320,6 +389,7 @@ def main():
         with open(opt.from_file, "r") as f:
             data = f.read().splitlines()
             data = list(chunk(data, frames))
+            assert len(data) == 1
 
     sample_path = os.path.join(outpath, "samples")
     os.makedirs(sample_path, exist_ok=True)
@@ -334,9 +404,9 @@ def main():
         x_T.append(first_frame)
         for i in range(opt.frames - 1):
             added_noise = torch.randn([1,opt.C, opt.H // opt.f, opt.W // opt.f],device = device) * (1/(1+opt.alpha*opt.alpha).sqrt())
-            current_frame = (opt.alpha*opt.alpha/(1+opt.alpha*opt.alpha)) * x_T[i] + added_noise
+            current_frame = (opt.alpha/(1+opt.alpha*opt.alpha).sqrt()) * x_T[i] + added_noise
             x_T.append(current_frame)
-        start_code = torch.cat(x_T,dim = 1)
+        start_code = torch.cat(x_T,dim = 0)
 
     precision_scope = autocast if opt.precision=="autocast" else nullcontext
     with torch.no_grad():
@@ -354,13 +424,16 @@ def main():
                         c = model.get_learned_conditioning(prompts)
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
                         samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
-                                                         conditioning=c,
                                                          frames=frames,
                                                          shape=shape,
-                                                         sigma_1=opt.first_guidance_variance, 
-                                                         sigma_2=opt.second_guidance_variance, 
+                                                         alpha = opt.alpha,
+                                                         sigma_1 = opt.sigma1,
+                                                         sigma_2 = opt.sigma2,
+                                                         sigma_3 = opt.sigma3,
                                                          first_guidance_scale=opt.first_guidance_scale, 
                                                          second_guidance_scale=opt.second_guidance_scale,
+                                                         total_guidance_scale=opt.total_guidance_scale,
+                                                         conditioning=c,
                                                          verbose=False,
                                                          unconditional_guidance_scale=opt.scale,
                                                          unconditional_conditioning=uc,
@@ -370,9 +443,7 @@ def main():
                         x_samples_ddim = model.decode_first_stage(samples_ddim)
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
                         x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
-
                         x_checked_image, has_nsfw_concept = check_safety(x_samples_ddim)
-
                         x_checked_image_torch = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
 
                         if not opt.skip_save:
