@@ -254,6 +254,7 @@ class DDIMSampler_video(object):
         #如果是前两帧就取自己，相当于没有插值
         img0 = torch.cat([pred_x0[0:2],pred_x0[0:-2]],dim = 0)
         img1 = pred_x0
+        #这一部分是follow原来插值的处理
         ph = ((h - 1) // 32 + 1) * 32
         pw = ((w - 1) // 32 + 1) * 32
         padding = (0, pw - w, 0, ph - h)
