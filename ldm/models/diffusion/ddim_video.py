@@ -238,7 +238,7 @@ class DDIMSampler_video(object):
         sigma_loss1 = torch.cat((sigma1,sigma2),dim = 0)
         sigma3 = torch.full((frames, 1, 1, 1), sigma3,device=device)
 
-        #所有的predict x0
+        #所有的predict z0
         pred_z0 = (z_variable - sqrt_one_minus_at * e_t) / a_t.sqrt()
         # pred_z0.requires_grad_(True) 
         #decode 到x0空间 还需检查中间转化是不是正确 follow txt2img.py line 313-322
