@@ -224,9 +224,8 @@ class DDIMSampler_video(object):
         if score_corrector is not None:
             assert self.model.parameterization == "eps"
             e_t = score_corrector.modify_score(self.model, e_t, z_variable, t, c, **corrector_kwargs)
-        e_t.requires_grad_(True) 
-        print('etoparation',e_t.grad_fn)
-        exit()
+        # e_t.requires_grad_(True) 
+
         alphas = self.model.alphas_cumprod if use_original_steps else self.ddim_alphas
         sqrt_one_minus_alphas = self.model.sqrt_one_minus_alphas_cumprod if use_original_steps else self.ddim_sqrt_one_minus_alphas
         # select parameters corresponding to the currently considered timestep
@@ -241,37 +240,37 @@ class DDIMSampler_video(object):
 
         #所有的predict x0
         pred_z0 = (z_variable - sqrt_one_minus_at * e_t) / a_t.sqrt()
-        pred_z0.requires_grad_(True) 
+        # pred_z0.requires_grad_(True) 
         #decode 到x0空间 还需检查中间转化是不是正确 follow txt2img.py line 313-322
         pred_x0 = self.model.decode_first_stage(pred_z0)
-        pred_x0.requires_grad_(True) 
+        # pred_x0.requires_grad_(True) 
+        #将pred_x0转到[0,1]
         pred_x0 = torch.clamp((pred_x0 + 1.0) / 2.0, min=0.0, max=1.0)
         pred_x0 = pred_x0.permute(0, 2, 3, 1).permute(0, 3, 1, 2)
-        #此时pred_x0 (frames,c,h,w) 需之后检查
-        #预测中间帧
+        #预测中间帧 [0,1]
         # print(pred_x0.shape)torch.Size([8, 3, 512, 512])
-        predict_middle_frame= []
+        
         _, c, h, w = pred_x0.shape
-        for frame in range(frames):
-            ph = ((h - 1) // 32 + 1) * 32
-            pw = ((w - 1) // 32 + 1) * 32
-            padding = (0, pw - w, 0, ph - h)
-            #如果是前两帧就取自己，相当于没有插值
-            img0 = F.pad(pred_x0[frame - 2 if frame >= 2 else frame].unsqueeze(0), padding)
-            img1 = F.pad(pred_x0[frame].unsqueeze(0), padding)
-            mid = self.RIFE_model.inference(img0, img1)
-            predict_middle_frame.append(mid)
-        predict_middle_frame = torch.stack(predict_middle_frame,dim=0).squeeze()
-        predict_middle_frame.requires_grad_(True) 
-        # print(pred_x0.shape)torch.Size([8, 3, 512, 512])
-        # print(predict_middle_frame.shape)torch.Size([8, 3, 512, 512])
+        #如果是前两帧就取自己，相当于没有插值
+        img0 = torch.cat([pred_x0[0:2],pred_x0[0:-2]],dim = 0)
+        img1 = pred_x0
+        ph = ((h - 1) // 32 + 1) * 32
+        pw = ((w - 1) // 32 + 1) * 32
+        padding = (0, pw - w, 0, ph - h)
+        img0 = F.pad(img0, padding)
+        img1 = F.pad(img1, padding)
+        predict_mid = self.RIFE_model.inference(img0, img1)
+        # predict_mid.requires_grad_(True) 
+        # print(mid.shape)torch.Size([8, 3, 512, 512])
+
         #两项loss
         tmp_pred_x0 = torch.cat([pred_x0[0:1],pred_x0[0:1],pred_x0[0:-2]],dim=0)
         # print(pred_x0[0: ,].shape)torch.Size([8, 3, 512, 512])
         loss_1 = first_guidance_scale * (tmp_pred_x0 - pred_x0[0: ,]) / sigma_loss1
-        loss_2 = second_guidance_scale * (pred_x0 - predict_middle_frame) / sigma3
-        loss_1.requires_grad_(True) 
-        loss_2.requires_grad_(True) 
+        # loss_2 = second_guidance_scale * (pred_x0 - predict_middle_frame) / sigma3
+        loss_2 = second_guidance_scale * (pred_x0 - predict_mid) / sigma3
+        # loss_1.requires_grad_(True) 
+        # loss_2.requires_grad_(True) 
         # print(loss_1.shape)torch.Size([8, 3, 512, 512])
         # print(loss_2.shape)torch.Size([8, 3, 512, 512])
         # print(z_variable.shape)torch.Size([8, 4, 64, 64])
@@ -280,7 +279,9 @@ class DDIMSampler_video(object):
         gradient = torch.ones_like(loss)
         loss.backward(gradient)
         guidance = z_variable.grad
-        print(guidance)
+        # print(z_variable.requires_grad)#true
+        # print(z_variable.is_leaf)#true
+        print(guidance)#None
 
         return e_t, pred_z0, guidance
     
