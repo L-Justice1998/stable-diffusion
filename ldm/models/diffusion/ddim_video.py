@@ -267,7 +267,6 @@ class DDIMSampler_video(object):
         tmp_pred_x0 = torch.cat([pred_x0[0:1],pred_x0[0:1],pred_x0[0:-2]],dim=0)
         # print(pred_x0[0: ,].shape)torch.Size([8, 3, 512, 512])
         loss_1 = first_guidance_scale * (tmp_pred_x0 - pred_x0[0: ,]) / sigma_loss1
-        # loss_2 = second_guidance_scale * (pred_x0 - predict_middle_frame) / sigma3
         loss_2 = second_guidance_scale * (pred_x0 - predict_mid) / sigma3
         # loss_1.requires_grad_(True) 
         # loss_2.requires_grad_(True) 
