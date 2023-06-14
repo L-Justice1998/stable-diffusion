@@ -2,6 +2,7 @@
 import argparse, os, sys, glob
 import imageio
 import cv2
+import math
 import torch
 import numpy as np
 from omegaconf import OmegaConf
@@ -245,19 +246,19 @@ def main():
         "--sigma1",
         type=float,
         help="first guidance variance",
-        default=0.05
+        default=1.
     )
     parser.add_argument(
         "--sigma2",
         type=float,
         help="first guidance variance",
-        default=0.1
+        default=1.
     )
     parser.add_argument(
         "--sigma3",
         type=float,
         help="first guidance variance",
-        default=0.03
+        default=1.
     )
     parser.add_argument(
         "--first_guidance_scale",
@@ -275,39 +276,14 @@ def main():
         "--total_guidance_scale",
         type=float,
         help="total guidance scale",
-        default=1.0
+        default=1.
     )
     parser.add_argument(
         "--alpha",
         type=float,
         help="progressive video prior hyperparameter",
-        default=0.05
+        default=10
     )
-    # parser.add_argument('--img', dest='img', nargs=2, required=True)
-    # for RIFE hyperparameters
-    # parser.add_argument(
-    #     '--exp', 
-    #     default=4, 
-    #     type=int
-    # )
-    # parser.add_argument(
-    #     '--ratio', 
-    #     default=0,
-    #     type=float, 
-    #     help='inference ratio between two images with 0 - 1 range'
-    # )
-    # parser.add_argument(
-    #     '--rthreshold', 
-    #     default=0.02, 
-    #     ype=float, 
-    #     help='returns image when actual ratio falls in given range threshold'
-    # )
-    # parser.add_argument(
-    #     '--rmaxcycles', 
-    #     default=8, 
-    #     type=int, 
-    #     help='limit max number of bisectional cycles'
-    # )
     parser.add_argument(
         '--model', 
         dest='modelDir', 
@@ -361,14 +337,15 @@ def main():
     #     sampler = PLMSSampler(model)
     # else:
     sampler = DDIMSampler_video(model,RIFE_model)
+    sampler1 = DDIMSampler(model)
 
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
 
-    print("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
-    wm = "StableDiffusionV1"
-    wm_encoder = WatermarkEncoder()
-    wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
+    # print("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
+    # wm = "StableDiffusionV1"
+    # wm_encoder = WatermarkEncoder()
+    # wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
 
     # batch_size = opt.n_samples
     # n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
@@ -398,81 +375,89 @@ def main():
 
     start_code = None
     if opt.fixed_code:
-        # start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device) 
+        # start_code = torch.randn([frames, opt.C, opt.H // opt.f, opt.W // opt.f], device=device) 
         x_T = []
         first_frame = torch.randn([1, opt.C, opt.H // opt.f, opt.W // opt.f],device = device)
         x_T.append(first_frame)
         for i in range(opt.frames - 1):
-            added_noise = torch.randn([1,opt.C, opt.H // opt.f, opt.W // opt.f],device = device) * (1/(1+opt.alpha*opt.alpha).sqrt())
-            current_frame = (opt.alpha/(1+opt.alpha*opt.alpha).sqrt()) * x_T[i] + added_noise
+            added_noise = torch.randn([1,opt.C, opt.H // opt.f, opt.W // opt.f],device = device) * (math.sqrt(1/(1+opt.alpha*opt.alpha)))
+            current_frame = (opt.alpha/math.sqrt((1+opt.alpha*opt.alpha))) * x_T[i] + added_noise
             x_T.append(current_frame)
         start_code = torch.cat(x_T,dim = 0)
 
     precision_scope = autocast if opt.precision=="autocast" else nullcontext
-    with torch.no_grad():
-        with precision_scope("cuda"):
-            with model.ema_scope():
-                tic = time.time()
-                all_samples = list()
-                for n in trange(opt.n_iter, desc="Sampling"):
-                    for prompts in tqdm(data, desc="data"):
-                        uc = None
-                        if opt.scale != 1.0:
-                            uc = model.get_learned_conditioning(frames * [""])
-                        if isinstance(prompts, tuple):
-                            prompts = list(prompts)
-                        c = model.get_learned_conditioning(prompts)
-                        shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                        samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
-                                                         frames=frames,
-                                                         shape=shape,
-                                                         alpha = opt.alpha,
-                                                         sigma_1 = opt.sigma1,
-                                                         sigma_2 = opt.sigma2,
-                                                         sigma_3 = opt.sigma3,
-                                                         first_guidance_scale=opt.first_guidance_scale, 
-                                                         second_guidance_scale=opt.second_guidance_scale,
-                                                         total_guidance_scale=opt.total_guidance_scale,
-                                                         conditioning=c,
-                                                         verbose=False,
-                                                         unconditional_guidance_scale=opt.scale,
-                                                         unconditional_conditioning=uc,
-                                                         eta=opt.ddim_eta,
-                                                         x_T=start_code)
+    with precision_scope("cuda"):
+        with model.ema_scope():
+            tic = time.time()
+            all_samples = list()
+            for n in trange(opt.n_iter, desc="Sampling"):
+                for prompts in tqdm(data, desc="data"):
+                    uc = None
+                    if opt.scale != 1.0:
+                        uc = model.get_learned_conditioning(frames * [""])
+                    if isinstance(prompts, tuple):
+                        prompts = list(prompts)
+                    c = model.get_learned_conditioning(prompts)
+                    shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+                    samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
+                                                        frames=frames,
+                                                        shape=shape,
+                                                        alpha = opt.alpha,
+                                                        sigma_1 = opt.sigma1,
+                                                        sigma_2 = opt.sigma2,
+                                                        sigma_3 = opt.sigma3,
+                                                        first_guidance_scale=opt.first_guidance_scale, 
+                                                        second_guidance_scale=opt.second_guidance_scale,
+                                                        total_guidance_scale=opt.total_guidance_scale,
+                                                        conditioning=c,
+                                                        verbose=False,
+                                                        unconditional_guidance_scale=opt.scale,
+                                                        unconditional_conditioning=uc,
+                                                        eta=opt.ddim_eta,
+                                                        x_T=start_code)
+                    # samples_ddim, _ = sampler1.sample(S=opt.ddim_steps,
+                    #                                      conditioning=c,
+                    #                                      batch_size=frames,
+                    #                                      shape=shape,
+                    #                                      verbose=False,
+                    #                                      unconditional_guidance_scale=opt.scale,
+                    #                                      unconditional_conditioning=uc,
+                    #                                      eta=opt.ddim_eta,
+                    #                                      x_T=start_code)
+                    
+                    x_samples_ddim = model.decode_first_stage(samples_ddim)
+                    x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                    x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
+                    # x_checked_image, has_nsfw_concept = check_safety(x_samples_ddim)
+                    x_checked_image_torch = torch.from_numpy(x_samples_ddim).permute(0, 3, 1, 2)
 
-                        x_samples_ddim = model.decode_first_stage(samples_ddim)
-                        x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-                        x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
-                        x_checked_image, has_nsfw_concept = check_safety(x_samples_ddim)
-                        x_checked_image_torch = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
+                    if not opt.skip_save:
+                        for x_sample in x_checked_image_torch:
+                            x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                            img = Image.fromarray(x_sample.astype(np.uint8))
+                            # img = put_watermark(img, wm_encoder)
+                            img.save(os.path.join(sample_path, f"{base_count:05}.png"))
+                            base_count += 1
 
-                        if not opt.skip_save:
-                            for x_sample in x_checked_image_torch:
-                                x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
-                                img = Image.fromarray(x_sample.astype(np.uint8))
-                                img = put_watermark(img, wm_encoder)
-                                img.save(os.path.join(sample_path, f"{base_count:05}.png"))
-                                base_count += 1
+                    if not opt.skip_grid:
+                        all_samples.append(x_checked_image_torch)
+            outputs = []
+            if not opt.skip_grid:
+                # additionally, save as grid
+                grid = torch.stack(all_samples, 0)
+                grid = rearrange(grid, 'n b c h w -> (n b) c h w')
+                grid = make_grid(grid, nrow=n_rows)
 
-                        if not opt.skip_grid:
-                            all_samples.append(x_checked_image_torch)
-                outputs = []
-                if not opt.skip_grid:
-                    # additionally, save as grid
-                    grid = torch.stack(all_samples, 0)
-                    grid = rearrange(grid, 'n b c h w -> (n b) c h w')
-                    grid = make_grid(grid, nrow=n_rows)
+                # to image
+                grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
+                img = Image.fromarray(grid.astype(np.uint8))
+                # img = put_watermark(img, wm_encoder)
+                outputs.append(img)
+                img.save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
+                grid_count += 1
 
-                    # to image
-                    grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-                    img = Image.fromarray(grid.astype(np.uint8))
-                    img = put_watermark(img, wm_encoder)
-                    outputs.append(img)
-                    img.save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
-                    grid_count += 1
-
-                imageio.mimsave(outpath + '/test.gif', outputs, fps=2)
-                toc = time.time()
+            imageio.mimsave(outpath + '/test.gif', outputs, fps=2)
+            toc = time.time()
 
     print(f"Your samples are ready and waiting for you here: \n{outpath} \n"
           f" \nEnjoy.")

@@ -63,12 +63,12 @@ class DDIMSampler_video(object):
                frames,
                shape,
                alpha,
-               sigma_1=0.01, 
-               sigma_2=0.001, 
-               sigma_3=0.001,
-               first_guidance_scale=1, 
-               second_guidance_scale=1,
-               total_guidance_scale=1,
+               sigma_1, 
+               sigma_2, 
+               sigma_3,
+               first_guidance_scale, 
+               second_guidance_scale,
+               total_guidance_scale,
                conditioning=None,
                callback=None,
                normals_sequence=None,
@@ -107,7 +107,8 @@ class DDIMSampler_video(object):
         print(f'Data shape for DDIM sampling is {size}, eta {eta}')
 
         samples, intermediates = self.ddim_sampling(conditioning, size,
-                                                    alpha = alpha,sigma_1=sigma_1, sigma_2=sigma_2,sigma_3=sigma_3,
+                                                    alpha = alpha,sigma_1=sigma_1, 
+                                                    sigma_2=sigma_2,sigma_3=sigma_3,
                                                     first_guidance_scale=first_guidance_scale, 
                                                     second_guidance_scale=second_guidance_scale,
                                                     total_guidance_scale=total_guidance_scale,
@@ -126,7 +127,7 @@ class DDIMSampler_video(object):
                                                     unconditional_conditioning=unconditional_conditioning,
                                                     )
         return samples, intermediates
-
+    
     @torch.no_grad()
     def ddim_sampling(self, cond, shape,alpha,sigma_1, 
                       sigma_2, sigma_3, first_guidance_scale, 
@@ -142,18 +143,23 @@ class DDIMSampler_video(object):
         frames, C, H, W = shape
         if x_T is None:
             x_T = []
-            # img = torch.randn(shape, device=device)
             # 用progressive的方法生成初始噪声
             first_frame = torch.randn((1,C,H,W),device = device)
             x_T.append(first_frame)
             for i in range(frames-1):
-                added_noise = torch.randn([1,C,H,W],device = device) * (math.sqrt(1/(1+alpha*alpha)))
-                current_frame = math.sqrt(alpha/(1+alpha*alpha)) * x_T[i] + added_noise
+                added_noise = torch.randn((1,C,H,W),device = device) * (math.sqrt(1/(1+alpha*alpha)))
+                current_frame = math.sqrt(alpha*alpha/(1+alpha*alpha)) * x_T[i] + added_noise
                 x_T.append(current_frame)
             img = torch.cat(x_T,dim = 0)
         else:
             img = x_T
+        torch.cuda.empty_cache()
         # 此时img应该(frames,c,h,w)
+
+        # if x_T is None:
+        #     img = torch.randn(shape, device=device)
+        # else:
+        #     img = x_T
 
         if timesteps is None:
             timesteps = self.ddpm_num_timesteps if ddim_use_original_steps else self.ddim_timesteps
@@ -161,7 +167,7 @@ class DDIMSampler_video(object):
             subset_end = int(min(timesteps / self.ddim_timesteps.shape[0], 1) * self.ddim_timesteps.shape[0]) - 1
             timesteps = self.ddim_timesteps[:subset_end]
 
-        intermediates = {'x_inter': [img], 'pred_x0': [img]}
+        intermediates = {'x_inter': [img], 'pred_z0': [img]}
         time_range = reversed(range(0,timesteps)) if ddim_use_original_steps else np.flip(timesteps)
         total_steps = timesteps if ddim_use_original_steps else timesteps.shape[0]
         print(f"Running DDIM Sampling with {total_steps} timesteps")
@@ -177,10 +183,16 @@ class DDIMSampler_video(object):
                 assert x0 is not None
                 img_orig = self.model.q_sample(x0, ts)  # TODO: deterministic forward pass?
                 img = img_orig * mask + (1. - mask) * img
-
-            e_t, pred_z0, guidance = self.cal_guidance(img, cond, ts, sigma_1,sigma_2,sigma_3, first_guidance_scale, second_guidance_scale,index,repeat_noise=False, use_original_steps=False, quantize_denoised=False,
-                      temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
-                      unconditional_guidance_scale=1., unconditional_conditioning=None)
+            with torch.enable_grad():
+                e_t, pred_z0, guidance = self.cal_guidance(img, cond, ts, 
+                                                           sigma_1,sigma_2,sigma_3, first_guidance_scale, second_guidance_scale,
+                                                           index=index, use_original_steps=ddim_use_original_steps,
+                                                            score_corrector=score_corrector,
+                                                            corrector_kwargs=corrector_kwargs,
+                                                            unconditional_guidance_scale=unconditional_guidance_scale,
+                                                            unconditional_conditioning=unconditional_conditioning)
+            torch.cuda.empty_cache()
+                                        
             outs = self.p_sample_ddim(img, e_t, pred_z0, guidance,index=index, 
                                       total_guidance_scale = total_guidance_scale,
                                       use_original_steps=ddim_use_original_steps,
@@ -193,14 +205,15 @@ class DDIMSampler_video(object):
 
             if index % log_every_t == 0 or index == total_steps - 1:
                 intermediates['x_inter'].append(img)
-                intermediates['pred_x0'].append(pred_z0)
+                intermediates['pred_z0'].append(pred_z0)
 
         return img, intermediates
-
-    @torch.no_grad()
-    def cal_guidance(self, z, c, t,sigma1,sigma2,sigma3, first_guidance_scale, second_guidance_scale,index,repeat_noise=False, use_original_steps=False, quantize_denoised=False,
-                      temperature=1., noise_dropout=0., score_corrector=None, corrector_kwargs=None,
-                      unconditional_guidance_scale=1., unconditional_conditioning=None):
+    
+    def cal_guidance(self, z, c, t,
+                     sigma1,sigma2,sigma3, first_guidance_scale, second_guidance_scale,
+                     index, use_original_steps=False, 
+                     score_corrector=None, corrector_kwargs=None,
+                    unconditional_guidance_scale=1., unconditional_conditioning=None):
         """
         z是上一时刻的所有隐空间有噪声的帧 是(frames,c,h,w)
         返回值是e_t, pred_z0, guidance
@@ -208,81 +221,123 @@ class DDIMSampler_video(object):
         frames, *_, device = *z.shape, z.device
         #unet的in_channel是4通道 第一个通道本来是bs的
         #用z_variable变量追踪梯度 
+        z_variable = torch.tensor(z, requires_grad = True)
 
-        z_variable = torch.tensor(z,requires_grad = True)
+
         # 无条件采样
-        if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
-            e_t = self.model.apply_model(z_variable, t, c)
-        # 有条件采样 会给一个无条件的条件
-        else:
-            z_in = torch.cat([z_variable] * 2)
-            t_in = torch.cat([t] * 2)
-            c_in = torch.cat([unconditional_conditioning, c])
-            e_t_uncond, e_t = self.model.apply_model(z_in, t_in, c_in).chunk(2)
-            e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
+        with torch.no_grad():
+            if unconditional_conditioning is None or unconditional_guidance_scale == 1.:
+                e_t = self.model.apply_model(z_variable, t, c)
+            # 有条件采样 会给一个无条件的条件
+            else:
+                z_in = torch.cat([z_variable] * 2)
+                t_in = torch.cat([t] * 2)
+                c_in = torch.cat([unconditional_conditioning, c])
+                e_t_uncond, e_t = self.model.apply_model(z_in, t_in, c_in).chunk(2)
+                e_t = e_t_uncond + unconditional_guidance_scale * (e_t - e_t_uncond)
 
-        if score_corrector is not None:
-            assert self.model.parameterization == "eps"
-            e_t = score_corrector.modify_score(self.model, e_t, z_variable, t, c, **corrector_kwargs)
-        # e_t.requires_grad_(True) 
+            if score_corrector is not None:
+                assert self.model.parameterization == "eps"
+                e_t = score_corrector.modify_score(self.model, e_t, z_variable, t, c, **corrector_kwargs)
 
+        #梯度测试
+        # e_t.backward(torch.ones_like(e_t))
+        # print(z_variable.grad)
+        # exit()
+        #e-1~e-2
+
+        #参数计算
         alphas = self.model.alphas_cumprod if use_original_steps else self.ddim_alphas
         sqrt_one_minus_alphas = self.model.sqrt_one_minus_alphas_cumprod if use_original_steps else self.ddim_sqrt_one_minus_alphas
         # select parameters corresponding to the currently considered timestep
         # index是指示几步的 从(b, 1, 1, 1)变成(frames, 1, 1, 1)
         a_t = torch.full((frames, 1, 1, 1), alphas[index], device=device)
         sqrt_one_minus_at = torch.full((frames, 1, 1, 1), sqrt_one_minus_alphas[index],device=device)
+        
         #三个高斯方差
         sigma1 = torch.full((2, 1, 1, 1), sigma1,device=device)
         sigma2 = torch.full((frames-2, 1, 1, 1), sigma2,device=device)
         sigma_loss1 = torch.cat((sigma1,sigma2),dim = 0)
-        sigma3 = torch.full((frames, 1, 1, 1), sigma3,device=device)
+        sigma3 = torch.full((frames-2, 1, 1, 1), sigma3,device=device)
 
         #所有的predict z0
         pred_z0 = (z_variable - sqrt_one_minus_at * e_t) / a_t.sqrt()
-        # pred_z0.requires_grad_(True) 
+ 
+        # pred_z0.backward(torch.ones_like(pred_z0))
+        # print(z_variable.grad)
+        # print(z_variable.grad.shape)
+        # # print(alphas[index])0.0058
+        # # print(sqrt_one_minus_alphas[index])0.9971
+        # exit()
+        #e0~e1
+
         #decode 到x0空间 还需检查中间转化是不是正确 follow txt2img.py line 313-322
+        #注意在ddpm.py中decode函数去掉取消梯度的部分
         pred_x0 = self.model.decode_first_stage(pred_z0)
-        # pred_x0.requires_grad_(True) 
+
+        # pred_x0.backward(torch.ones_like(pred_x0))
+        # print(z_variable.grad)
+        # print(z_variable.grad.shape)
+        # exit()
+        # 这里梯度就很大 e1~e2
+
         #将pred_x0转到[0,1]
         pred_x0 = torch.clamp((pred_x0 + 1.0) / 2.0, min=0.0, max=1.0)
         pred_x0 = pred_x0.permute(0, 2, 3, 1).permute(0, 3, 1, 2)
+        
+
         #预测中间帧 [0,1]
         # print(pred_x0.shape)torch.Size([8, 3, 512, 512])
         
+        # pred_x0.backward(torch.ones_like(pred_x0))
+        # print(z_variable.grad)
+        # print(z_variable.grad.shape)
+        # exit()
+        #和上次相比梯度少了一半
+
         _, c, h, w = pred_x0.shape
         #如果是前两帧就取自己，相当于没有插值
-        img0 = torch.cat([pred_x0[0:2],pred_x0[0:-2]],dim = 0)
-        img1 = pred_x0
+        img0 = pred_x0[0:-2]
+        img1 = pred_x0[2:]
         #这一部分是follow原来插值的处理
         ph = ((h - 1) // 32 + 1) * 32
         pw = ((w - 1) // 32 + 1) * 32
         padding = (0, pw - w, 0, ph - h)
         img0 = F.pad(img0, padding)
         img1 = F.pad(img1, padding)
-        predict_mid = self.RIFE_model.inference(img0, img1)
-        # predict_mid.requires_grad_(True) 
+        predict_mid = self.RIFE_model.inference(img0.detach(), img1)
+
         # print(mid.shape)torch.Size([8, 3, 512, 512])
+
+        # predict_mid.backward(torch.ones_like(predict_mid))
+        # print(z_variable.grad)
+        # print(z_variable.grad.shape)
+        # print(predict_mid.shape)
+        # exit()
+        #梯度波动小
 
         #两项loss
         tmp_pred_x0 = torch.cat([pred_x0[0:1],pred_x0[0:1],pred_x0[0:-2]],dim=0)
         # print(pred_x0[0: ,].shape)torch.Size([8, 3, 512, 512])
-        loss_1 = first_guidance_scale * (tmp_pred_x0 - pred_x0[0: ,]) / sigma_loss1
-        loss_2 = second_guidance_scale * (pred_x0 - predict_mid) / sigma3
-        # loss_1.requires_grad_(True) 
-        # loss_2.requires_grad_(True) 
-        # print(loss_1.shape)torch.Size([8, 3, 512, 512])
-        # print(loss_2.shape)torch.Size([8, 3, 512, 512])
-        # print(z_variable.shape)torch.Size([8, 4, 64, 64])
-        loss = loss_1 + loss_2
-        loss.requires_grad_(True) 
-        gradient = torch.ones_like(loss)
-        loss.backward(gradient)
-        guidance = z_variable.grad
+        #只对i时刻的z求导
+        loss_1 = first_guidance_scale * (- (tmp_pred_x0.detach() - pred_x0[0: ,])**2) / sigma_loss1**2
+        # print(- (tmp_pred_x0 - pred_x0[0: ,])**2) 
+        # e-1~e-2
+        #因为要使shape保持一致 因此对于前两帧 插值的时候使得两张都是前两帧 插值出来的也应该是前两帧
+        # pred_x0也是本身 因此为0
+        loss_2 = second_guidance_scale * (- (pred_x0[1:-1].detach() - predict_mid)**2) / sigma3**2
+
+        # e-1~e-3
+        loss = loss_1.sum() + loss_2.sum()
+        # loss.requires_grad_(True) 
+        # loss.sum().backward()
+        # guidance = z_variable.grad
+        guidance = torch.autograd.grad(outputs = loss.sum(), inputs = z_variable)[0]
         # print(z_variable.requires_grad)#true
         # print(z_variable.is_leaf)#true
-        print(guidance)#None
-
+        # print(guidance)
+        # print(guidance.shape)
+        #e1~e3
         return e_t, pred_z0, guidance
     
     @torch.no_grad()
@@ -301,18 +356,23 @@ class DDIMSampler_video(object):
         sigma_t = torch.full((frames, 1, 1, 1), sigmas[index], device=device)
         if quantize_denoised:
             pred_z0, _, *_ = self.model.first_stage_model.quantize(pred_z0)
-        # direction pointing to x_t
+        # direction pointing to z_t
         # print(e_t.shape)torch.Size([8, 4, 64, 64])
 
-        dir_xt = (1. - a_prev - sigma_t**2).sqrt() * e_t
+        dir_zt = (1. - a_prev - sigma_t**2).sqrt() * e_t
         noise = sigma_t * noise_like(x.shape, device, repeat_noise) * temperature
         if noise_dropout > 0.:
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
 
         # 利用上一步算出的guidance进行引导
-        x_prev = a_prev.sqrt() * pred_z0 + dir_xt + sigma_t**2 * total_guidance_scale * guidance + noise
 
-        return x_prev, pred_z0
+        x_prev = a_prev.sqrt() * pred_z0 + dir_zt  + noise
+        x_prev_new = x_prev + sigma_t**2 * total_guidance_scale * guidance
+        # print(x_prev == x_prev_new)
+        # if False in (x_prev == x_prev_new):
+        #     print(index)
+        #     exit()
+        return x_prev_new, pred_z0
     #没改下面的 采样时没用到
     @torch.no_grad()
     def stochastic_encode(self, x0, t, use_original_steps=False, noise=None):
